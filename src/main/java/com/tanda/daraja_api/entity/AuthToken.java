@@ -1,10 +1,11 @@
 package com.tanda.daraja_api.entity;
 
-import jakarta.persistence.*;
+
 import lombok.Data;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
+import javax.persistence.*;
 import java.util.Date;
 
 @Entity

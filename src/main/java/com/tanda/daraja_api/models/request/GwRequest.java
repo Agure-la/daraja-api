@@ -1,16 +1,15 @@
 package com.tanda.daraja_api.models.request;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.constraints.DecimalMax;
-import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.Getter;
 import lombok.Setter;
 
-import java.util.UUID;
+import javax.validation.constraints.DecimalMax;
+import javax.validation.constraints.DecimalMin;
+import javax.validation.constraints.NotEmpty;
+import javax.validation.constraints.NotNull;
 
 @Data
 @Setter
@@ -18,8 +17,9 @@ import java.util.UUID;
 @AllArgsConstructor
 public class GwRequest {
 
-    @JsonProperty("id")
-    private String id;
+    @NotEmpty(message = "UUID must not be empty")
+    @JsonProperty("uuid")
+    private String uuid;
 
     @JsonProperty("amount")
     @NotNull(message = "Amount must not be null")
@@ -28,7 +28,11 @@ public class GwRequest {
     public float amount;
 
     @JsonProperty("mobile_number")
+    @NotEmpty(message = "Mobile number must not be empty")
    // @Pattern(regexp = "^07[0-9]{8}$", message = "Invalid Safaricom mobile number")
     public String mobileNumber;
+
+    @JsonProperty("call_url")
+    public String callBackUrl;
 
 }

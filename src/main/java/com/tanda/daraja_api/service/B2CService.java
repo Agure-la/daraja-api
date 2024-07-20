@@ -1,13 +1,14 @@
 package com.tanda.daraja_api.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.tanda.daraja_api.config.MpesaConfiguration;
 import com.tanda.daraja_api.entity.AuthToken;
-import com.tanda.daraja_api.entity.B2CResponseEntity;
-import com.tanda.daraja_api.entity.Transaction;
+import com.tanda.daraja_api.entity.B2CRequestEntity;
+import com.tanda.daraja_api.messaging.KafkaProducer;
+import com.tanda.daraja_api.models.request.GwRequest;
 import com.tanda.daraja_api.repository.AuthTokenRepository;
 import com.tanda.daraja_api.repository.B2CResponseEntityRepository;
 import lombok.RequiredArgsConstructor;
+import net.minidev.json.JSONArray;
 import net.minidev.json.JSONObject;
 import net.minidev.json.JSONValue;
 import okhttp3.*;
@@ -15,7 +16,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -30,8 +30,6 @@ public class B2CService {
     @Autowired
     AuthTokenRepository tokenRepository;
 
-    private final MpesaConfiguration mpesaConfiguration;
-
     private final OkHttpClient client;
 
     private final ObjectMapper objectMapper;
@@ -45,11 +43,12 @@ public class B2CService {
     private B2CResponseEntityRepository b2CResponseEntityRepository;
 
     @Autowired
-    private KafkaTemplate<String, String> kafkaTemplate;
+    KafkaProducer kafkaProducer;
 
     private static final String CHARACTERS = "0123456789abcdef";
 
     private static final Random RANDOM = new Random();
+
 
     public String generateAccessToken() {
         String token;
@@ -86,7 +85,6 @@ public class B2CService {
         else {
             long updatedAtTimestamp = optionalAuthToken.get().getUpdatedAt().getTime();
 
-          // Get current time in milliseconds
             long currentTimeMillis = System.currentTimeMillis();
 
            // Calculate minutes difference
@@ -103,30 +101,25 @@ public class B2CService {
         return token;
     }
 
-    public void initiateB2CTransaction(Transaction transaction){
+    public String initiateB2CTransaction(GwRequest gwRequest){
         String accessToken = checkToken("B2C");
 
-        System.out.println("REQUEST " + transaction.getPhone());
-        System.out.println("TOKEEEEEN " + accessToken);
         JSONObject json = new JSONObject();
-        String transactionId = transaction.getTransactionId();
-        String phoneNumber = transaction.getPhone();
-        json.put("OriginatorConversationID", transactionId);
+        String phoneNumber = gwRequest.getMobileNumber();
+        json.put("OriginatorConversationID", generateRandomString());
         json.put("InitiatorName", "testapi");
         json.put("SecurityCredential", securityCredential);
         json.put("CommandID", "SalaryPayment");
-        json.put("Amount", transaction.getAmount());
+        json.put("Amount", gwRequest.getAmount());
         json.put("PartyA", "600983");
         json.put("PartyB", phoneNumber);
         json.put("Remarks", "Test remarks");
-        json.put("QueueTimeOutURL", "https://webhook.site/a4ff5d34-ee6d-45ea-8a12-618b617f363b");
-        json.put("ResultURL", "https://webhook.site/a4ff5d34-ee6d-45ea-8a12-618b617f363b");
+        json.put("QueueTimeOutURL", "https://www.tanda.africa/payment/callback");
+        json.put("ResultURL", "https://www.tanda.africa/payment/callback");
         json.put("occasion", "null");
 
-        System.out.println("OBJECT " + json);
-// Serialize JSONObject to JSON string
+       // Serialize JSONObject to JSON string
         String jsonString = json.toJSONString();
-        System.out.println("CONVERTED " + jsonString);
         OkHttpClient client = new OkHttpClient().newBuilder()
                 .build();
         MediaType mediaType = MediaType.parse("application/json");
@@ -148,15 +141,19 @@ public class B2CService {
             String originatorConversationID = (String) jsons.get("OriginatorConversationID");
             String responseDescription = (String) jsons.get("ResponseDescription");
 
-            B2CResponseEntity responseEntity = new B2CResponseEntity();
+            B2CRequestEntity responseEntity = new B2CRequestEntity();
             responseEntity.setConversationID(conversationID);
             responseEntity.setOriginatorConversationID(originatorConversationID);
             responseEntity.setResponseDescription(responseDescription);
+            responseEntity.setCallBackUrl(gwRequest.getCallBackUrl());
+            responseEntity.setTransactionAmount(gwRequest.getAmount());
+            responseEntity.setUuid(gwRequest.getUuid());
             b2CResponseEntityRepository.save(responseEntity);
 
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+        return "Success";
     }
 
     public static String generateRandomString() {
@@ -181,8 +178,6 @@ public class B2CService {
         try {
             // Parse the response
             JSONObject jsonResponse = (JSONObject) JSONValue.parse(response);
-            System.out.println("RESPONSE " + jsonResponse);
-
             String responseCode = (String) jsonResponse.get("ResponseCode");
 
             // Check if the response code indicates success
@@ -193,78 +188,92 @@ public class B2CService {
                 String responseDescription = (String) jsonResponse.get("ResponseDescription");
 
                 // Log the successful response
-                System.out.println("Mpesa Response Successful: " + responseDescription);
-
-                storeMpesaResponse(conversationID, originatorConversationID, responseDescription, "Success");
+                storeMpesaResponse(conversationID, originatorConversationID, responseDescription, 1);
 
                 // Send the result back to CPS
-                sendResultToCPS(conversationID, "Success", originatorConversationID);
+                sendResultToCPS(conversationID, 1, originatorConversationID);
 
             } else {
-                // Log the failure response
-                System.err.println("Mpesa Response Failed: " + response);
-
                 // Handle failure scenario
-                sendResultToCPS(null, "Failure", null);
+                sendResultToCPS(null, 2, null);
             }
         } catch (Exception e) {
             e.printStackTrace();
-            sendResultToCPS(null, "Failure", null);
+            sendResultToCPS(null, 2, null);
         }
     }
 
-    private void storeMpesaResponse(String conversationID, String originatorConversationID, String responseDescription, String status) {
-        B2CResponseEntity b2CResponseEntity = new B2CResponseEntity();
-        b2CResponseEntity.setConversationID(conversationID);
-        b2CResponseEntity.setOriginatorConversationID(originatorConversationID);
-        b2CResponseEntity.setResponseDescription(responseDescription);
-       // b2CResponseEntity.setStatus(status);
-        b2CResponseEntityRepository.save(b2CResponseEntity);
+    private void storeMpesaResponse(String conversationID, String originatorConversationID, String responseDescription, int status) {
+        B2CRequestEntity b2CRequestEntity = new B2CRequestEntity();
+        b2CRequestEntity.setConversationID(conversationID);
+        b2CRequestEntity.setOriginatorConversationID(originatorConversationID);
+        b2CRequestEntity.setResponseDescription(responseDescription);
+        b2CRequestEntity.setStatus(status);
+        b2CResponseEntityRepository.save(b2CRequestEntity);
     }
 
-    private void sendResultToCPS(String transactionId, String status, String mpesaRef) {
-        String resultPayload = String.format("{\"transactionId\":\"%s\",\"status\":\"%s\",\"mpesaRef\":\"%s\"}", transactionId, status, mpesaRef);
-        kafkaTemplate.send("cpsResultTopic", resultPayload);
+    private void sendResultToCPS(String transactionId, int status, String mpesaRef) {
+        String resultPayload = String.format("{\"transactionId\":\"%s\",\"status\":\"%d\",\"mpesaRef\":\"%s\"}", transactionId, status, mpesaRef);
+        kafkaProducer.sendMessage("cpsResultTopic", resultPayload);
     }
 
-    public void handleMpesaCallback(Object callback) {
+    public String handleMpesaCallback(Object callback) {
         try {
             JSONObject jsonResponse = (JSONObject) JSONValue.parse(callback.toString());
-            String originatorConversationID = (String) jsonResponse.get("OriginatorConversationID");
-            String conversationId = (String) jsonResponse.get("conversationID");
-            String resultCode = (String) jsonResponse.get("ResultCode");
+            JSONObject result = (JSONObject) jsonResponse.get("Result");
 
-            String status;
-            if ("0".equals(resultCode)) {
-                status = "Success";
-                Optional<B2CResponseEntity> existingTransaction = b2CResponseEntityRepository.findByOriginatorConversationIDAndConversationID(originatorConversationID, conversationId);
-                if(existingTransaction.isEmpty()){
+            if (result != null) {
+                String originatorConversationID = (String) result.get("OriginatorConversationID");
+                String conversationId = (String) result.get("ConversationID");
+                int resultCode = (int) result.get("ResultCode");
+                String resultDes = (String) result.get("ResultDesc");
+                String transactionId = (String) result.get("TransactionID");
+
+                Optional<B2CRequestEntity> existingTransaction = b2CResponseEntityRepository.findByOriginatorConversationIDAndConversationID(originatorConversationID, conversationId);
+                if (existingTransaction.isEmpty()) {
                     throw new RuntimeException("Transaction does not exist");
                 }
-                existingTransaction.get().setResultDesc((String) jsonResponse.get("ResultDesc"));
-                existingTransaction.get().setTransactionId((String) jsonResponse.get("TransactionID"));
-                String test = (String) jsonResponse.get("ResultParameter");
-                System.out.println("TESSSSSSSSSSSSSSSSSSSSSSTTTT " + test);
-                //existingTransaction.get().setTransactionAmount();
-            } else {
-                status = "Failure";
+                if (resultCode == 0) {
+                    existingTransaction.get().setResultDesc((String) jsonResponse.get("ResultDesc"));
+                    existingTransaction.get().setTransactionId((String) jsonResponse.get("TransactionID"));
+                    existingTransaction.get().setStatus(1);
+                    existingTransaction.get().setResultDesc(resultDes);
+                    JSONObject resultParameters = (JSONObject) result.get("ResultParameters");
+                    if (resultParameters != null) {
+                        JSONArray resultParameterArray = (JSONArray) resultParameters.get("ResultParameter");
+                        if (resultParameterArray != null) {
+                            for (Object param : resultParameterArray) {
+                                JSONObject paramObject = (JSONObject) param;
+                                String key = (String) paramObject.get("Key");
+                                Object value = paramObject.get("Value");
+                                if ("TransactionAmount".equals(key)) {
+                                    existingTransaction.get().setTransactionAmount((float) Double.parseDouble(value.toString()));
+                                } else if ("ReceiverPartyPublicName".equals(key)) {
+                                    existingTransaction.get().setReceiverPartyPublicName(value.toString());
+                                } else if ("TransactionCompletedDateTime".equals(key)) {
+                                    existingTransaction.get().setTransactionCompletedDateTime(value.toString());
+                                } else if ("TransactionReceipt".equals(key)) {
+                                    existingTransaction.get().setTransactionId(value.toString());
+                                }
+
+                            }
+                        }
+                    }
+
+                } else {
+                    existingTransaction.get().setStatus(2);
+                    existingTransaction.get().setResultCode(resultCode);
+                    existingTransaction.get().setResultDesc(resultDes);
+                    existingTransaction.get().setTransactionId(transactionId);
+                }
+                b2CResponseEntityRepository.save(existingTransaction.get());
+
+                // Send the final result to CPS
+                sendResultToCPS(existingTransaction.get().getTransactionId(), existingTransaction.get().getStatus(), originatorConversationID);
             }
-
-            // Update MariaDB with the final status
-            updateTransactionStatus(originatorConversationID, status);
-
-            // Send the final result to CPS
-            sendResultToCPS(null, status, originatorConversationID);
-        } catch (Exception e) {
-            e.printStackTrace();
+            } catch(Exception e){
+                e.printStackTrace();
         }
-    }
-
-    private void updateTransactionStatus(String originatorConversationID, String status) {
-        B2CResponseEntity b2CResponseEntity = b2CResponseEntityRepository.findByOriginatorConversationID(originatorConversationID);
-        if (b2CResponseEntity != null) {
-           // b2CResponseEntity.setStatus(status);
-            b2CResponseEntityRepository.save(b2CResponseEntity);
-        }
+        return "Success";
     }
 }
